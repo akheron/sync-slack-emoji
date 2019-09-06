@@ -3,6 +3,7 @@
 const assert = require('assert')
 const cheerio = require('cheerio')
 const config = require('config')
+const _eval = require('eval')
 const _ = require('lodash')
 const rp = require('request-promise')
 const v = require('voca')
@@ -54,29 +55,47 @@ async function tryLogin({ formData, jar, domain, email, password }) {
 async function fetchEmojis({ domain, jar }) {
   process.stdout.write('\nFetch emoji ')
 
-  const emojis = []
+  const uri = `https://${domain}.slack.com/customize/emoji`
+  const $ = await rp({
+    uri,
+    headers: { 'User-Agent': ua },
+    jar,
+    transform: v => cheerio.load(v),
+  })
+
+  const bootDataScript = $("script:contains('var boot_data =')").first().html()
+  const bootData = _eval(bootDataScript + '\nmodule.exports = boot_data;')
+  const apiToken = bootData.api_token
+
+  let emojis = []
   for (let page = 1; ; ++page) {
     process.stdout.write('.')
 
-    const uri = `https://${domain}.slack.com/customize/emoji?page=${page}`
-    const $ = await rp({
+    const uri = `https://${domain}.slack.com/api/emoji.adminList`
+    const response = await rp({
+      method: 'POST',
       uri,
+      formData: {
+        page,
+        count: 100,
+        token: apiToken,
+        _x_reason: 'customize-emoji-new-query',
+        _x_mode: 'online',
+      },
       headers: { 'User-Agent': ua },
       jar,
-      transform: v => cheerio.load(v),
+      transform: v => JSON.parse(v),
     })
 
-    const elems = $('#custom_emoji .emoji_row').toArray()
-    if (elems.length === 0) break
+    // TODO: Handle aliases
+    emojis = emojis.concat(response.emoji.map(({ name, url }) => ({
+      name,
+      uri: url
+    })))
 
-    for (const elem of elems) {
-      const uri = $('[data-original]', elem).attr('data-original')
-      const name = v($('.custom_emoji_name', elem).text())
-        .trim('\n\t ')
-        .replace(/\:/g, '')
-        .value()
-      emojis.push({ uri, name })
-    }
+    if (page >= response.paging.pages)
+      break;
+
     // break // for debug
   }
 
